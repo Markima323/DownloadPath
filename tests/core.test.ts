@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createDefaultSettings,
+  MAX_ABSOLUTE_DIRECTORY_LENGTH,
   MAX_PRESETS,
   MAX_RULES,
+  normalizeAbsoluteDirectory,
   normalizeDomain,
   normalizeSubdirectory,
   resolveDownload,
+  validateAbsoluteDirectory,
   validateSettings,
   validateSubdirectory,
   type DownloadContext,
@@ -220,4 +223,124 @@ test("an empty configuration is valid and unmatched", () => {
   const config: Settings = { version: 1, enabled: true, presets: [], rules: [] };
   assert.equal(validateSettings(config).ok, true);
   assert.equal(resolveDownload(config, download).kind, "unmatched");
+});
+
+test("absolute directories accept local drive roots and normalize separators and case", () => {
+  for (const [input, expected] of [
+    ["D:\\", "D:\\"],
+    ["d:/", "D:\\"],
+    ["d:/Work/Reports/", "D:\\Work\\Reports"],
+    ["e:\\工作\\报表\\", "E:\\工作\\报表"],
+    ["Z:\\Folder Name\\2026", "Z:\\Folder Name\\2026"],
+  ]) {
+    assert.deepEqual(validateAbsoluteDirectory(input!), [], input);
+    assert.equal(normalizeAbsoluteDirectory(input!), expected);
+  }
+});
+
+test("absolute directories allow long paths while bounding total and component lengths", () => {
+  const longValid = `D:\\${Array(7).fill("a".repeat(250)).join("\\")}`;
+  assert.ok(longValid.length > 240, "absolute paths are not subject to old relative path limit");
+  assert.deepEqual(validateAbsoluteDirectory(longValid), []);
+  assert.deepEqual(validateAbsoluteDirectory(`D:\\${"a".repeat(255)}`), []);
+  assert.notEqual(validateAbsoluteDirectory(`D:\\${"a".repeat(256)}`).length, 0);
+  const exactlyMax = `D:\\${[...Array(7).fill("a".repeat(248)), "b".repeat(254)].join("\\")}`;
+  assert.equal(exactlyMax.length, MAX_ABSOLUTE_DIRECTORY_LENGTH);
+  assert.deepEqual(validateAbsoluteDirectory(exactlyMax), []);
+  assert.notEqual(validateAbsoluteDirectory(`${exactlyMax}b`).length, 0);
+});
+
+test("absolute directory validation rejects ambiguous, remote, device, traversal and ADS paths", () => {
+  const invalid = [
+    "", "Work", "/tmp/work", "\\Work", "D:", "D:Work", "1:\\Work", " D:\\Work",
+    "\\\\server\\share", "//server/share", "\\\\?\\D:\\Work", "\\\\.\\D:\\Work",
+    "D:\\\\", "D:\\\\Work", "D:\\Work\\\\Reports", "D:\\Work\\\\", "D:/Work//Reports",
+    "D:\\..\\Outside", "D:\\Work\\..\\Outside", "D:\\.\\Work", "D:\\Work\\.",
+    "D:\\Work:stream", "D:\\Work\\report:stream", "D:\\a?b", "D:\\a*b", "D:\\a|b",
+    'D:\\a"b', "D:\\a<b", "D:\\a>b", "D:\\a\u0000b", "D:\\a\nb", "D:\\a\rb",
+    "D:\\Work.", "D:\\Work ", "D:\\Work.\\Reports", "D:\\CON", "D:\\NUL.txt",
+    "D:\\LPT1", "D:\\COM9.csv", "D:\\CON .txt", "D:\\CONIN$", "D:\\CONOUT$.txt",
+    "D:\\COM¹.txt", "D:\\Work\\ ",
+  ];
+  for (const input of invalid) {
+    assert.notEqual(validateAbsoluteDirectory(input).length, 0, JSON.stringify(input));
+    assert.throws(() => normalizeAbsoluteDirectory(input), { name: "Error" }, JSON.stringify(input));
+  }
+});
+
+test("legacy settings without a mode retain their exact schema and behavior", () => {
+  const old = settings(rule());
+  const validated = validateSettings(JSON.parse(JSON.stringify(old)));
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.deepEqual(validated.settings, old);
+  assert.equal(validated.settings.version, 1);
+  assert.equal(Object.hasOwn(validated.settings.presets[0]!, "mode"), false);
+  const result = resolveDownload(validated.settings, download);
+  assert.equal(result.kind, "matched");
+  if (result.kind === "matched") {
+    assert.equal(result.relativePath, "Software/安装包.zip");
+    assert.equal(Object.hasOwn(result, "absoluteDirectory"), false);
+  }
+});
+
+test("relative and absolute presets coexist and normalize in the same version 1 settings", () => {
+  const config = settings(
+    rule({ id: "relative-rule" }),
+    rule({ id: "absolute-rule", source: "finalUrl", domain: "cdn.example.net", presetId: "absolute", priority: 20 }),
+  );
+  config.presets[0]!.mode = "relative";
+  config.presets.push({ id: "absolute", name: "工作绝对目录", mode: "absolute", subdirectory: "d:/工作/报表/" });
+  const validated = validateSettings(config);
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.equal(validated.settings.presets[0]!.mode, "relative");
+  assert.deepEqual(validated.settings.presets.at(-1), { id: "absolute", name: "工作绝对目录", mode: "absolute", subdirectory: "D:\\工作\\报表" });
+  const absolute = resolveDownload(validated.settings, download);
+  assert.equal(absolute.kind, "matched");
+  if (absolute.kind === "matched") {
+    assert.equal(absolute.rule.id, "absolute-rule");
+    assert.equal(absolute.relativePath, "安装包.zip", "absolute paths expose only the basename to the browser download layer");
+    assert.equal(absolute.absoluteDirectory, "D:\\工作\\报表");
+  }
+  const relative = resolveDownload(validated.settings, { ...download, finalUrl: "https://different.example.net/file" });
+  assert.equal(relative.kind, "matched");
+  if (relative.kind === "matched") {
+    assert.equal(relative.relativePath, "Software/安装包.zip");
+    assert.equal(Object.hasOwn(relative, "absoluteDirectory"), false);
+  }
+});
+
+test("absolute results keep traversal and reserved names out of the output filename", () => {
+  const config = settings(rule());
+  config.presets[0] = { id: "software", name: "软件", mode: "absolute", subdirectory: "e:/软件/" };
+  for (const [input, expected] of [
+    ["../../secret.zip", "secret.zip"],
+    ["..\\..\\secret.zip", "secret.zip"],
+    ["C:\\outside\\安装包.zip", "安装包.zip"],
+    ["CON.txt", "_CON.txt"],
+    ["file:stream.txt", "file_stream.txt"],
+  ]) {
+    const result = resolveDownload(config, { ...download, filename: input! });
+    assert.equal(result.kind, "matched");
+    if (result.kind === "matched") {
+      assert.equal(result.relativePath, expected);
+      assert.equal(result.absoluteDirectory, "E:\\软件");
+      assert.equal(/[\\/]/.test(result.relativePath), false);
+    }
+  }
+});
+
+test("invalid modes or unsafe absolute presets are rejected on import and at resolution", () => {
+  for (const preset of [
+    { id: "software", name: "软件", mode: "remote", subdirectory: "Software" },
+    { id: "software", name: "软件", mode: "absolute", subdirectory: "Software" },
+    { id: "software", name: "软件", mode: "absolute", subdirectory: "D:\\Work\\..\\Outside" },
+    { id: "software", name: "软件", mode: "relative", subdirectory: "D:\\Work" },
+  ]) {
+    const config = settings(rule());
+    config.presets[0] = preset as never;
+    assert.equal(validateSettings(config).ok, false);
+    assert.equal(resolveDownload(config, download).kind, "invalid");
+  }
 });

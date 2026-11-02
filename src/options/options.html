@@ -25,7 +25,7 @@
         <div class="sidebar-bottom">
           <div class="local-note"><span class="privacy-dot"></span> 配置与记录保存在本机</div>
           <p>把整理留给规则，<br />把时间留给自己。</p>
-          <span class="version">V0.1.0 · CHROME 扩展</span>
+          <span class="version">V0.2.0 · CHROME 扩展</span>
         </div>
       </aside>
 
@@ -39,6 +39,7 @@
           <div id="load-error" class="notice notice-error" role="alert" hidden><span id="load-error-text"></span><button id="retry-load" class="button button-small button-secondary" type="button">重试</button></div>
           <div id="config-warning" class="notice notice-warning" role="alert" hidden></div>
           <div id="disabled-notice" class="notice notice-neutral" hidden>自动分流已暂停。你仍然可以编辑规则；重新开启后，新下载将应用规则。</div>
+          <div id="native-warning" class="notice notice-warning native-notice" hidden><div><strong id="native-warning-title">绝对路径需要 Windows 辅助程序</strong><p id="native-warning-description"></p></div><a class="text-link" href="#help">安装与检测 →</a></div>
 
           <section id="panel-rules" data-panel="rules" aria-labelledby="rules-title">
             <div class="page-heading"><div><p class="eyebrow">A PLACE FOR EVERY DOWNLOAD</p><h1 id="rules-title">下载，各归其位。</h1><p class="page-description">为网站指定路径，让每次下载自动抵达熟悉的位置。</p></div><button class="button button-primary" id="new-rule" type="button"><span aria-hidden="true">＋</span> 新建规则</button></div>
@@ -73,15 +74,36 @@
 
           <section id="panel-presets" data-panel="presets" aria-labelledby="presets-title" hidden>
             <div class="page-heading"><div><p class="eyebrow">YOUR DOWNLOAD DESTINATIONS</p><h1 id="presets-title">先为文件，留好位置。</h1><p class="page-description">把常用目录保存为预设，再关联到一个或多个网站。</p></div><button class="button button-primary" id="new-preset" type="button"><span aria-hidden="true">＋</span> 新建预设</button></div>
-            <div class="notice notice-tip"><span aria-hidden="true">▱</span><div><strong>所有路径都位于 Chrome 默认下载目录内。</strong><p>例如预设填写 <code>Reports/2026</code>，文件会保存到“默认下载目录 → Reports → 2026”。如需更换根目录，请前往 Chrome 下载设置。</p></div></div>
+            <div class="notice notice-tip"><span aria-hidden="true">▱</span><div><strong>选择默认下载目录内的子目录，或 Windows 绝对路径。</strong><p>相对子目录无需额外安装；绝对路径支持不同盘符，需要 Windows 辅助程序在 Chrome 下载完成后自动移动文件。</p></div></div>
             <div id="presets-list" class="preset-grid"></div>
             <div id="presets-empty" class="card empty-state" hidden><h3>还没有路径预设</h3><p>添加一个目录，开始整理下载。</p></div>
-            <section class="card preset-editor" aria-labelledby="preset-form-title"><div class="card-heading"><span class="card-step">＋</span><div><h2 id="preset-form-title">新建路径预设</h2><p>使用容易辨认的名称，方便在网站规则中选择。</p></div></div><form id="preset-form"><input id="preset-id" type="hidden" /><div class="form-grid"><label class="field">预设名称<input id="preset-name" required maxlength="80" placeholder="例如：工作报表" /></label><label class="field">目标子目录<input id="preset-directory" required maxlength="240" placeholder="例如：Work/Reports" spellcheck="false" /><span class="field-hint">支持多层子目录；不支持盘符、绝对路径或 ..</span></label></div><div class="directory-preview" id="directory-preview">默认下载目录 / …</div><div class="form-actions"><button class="button button-primary" type="submit" id="save-preset">保存预设</button><button class="button button-quiet" type="button" id="cancel-preset">取消编辑</button></div></form></section>
+            <section class="card preset-editor" aria-labelledby="preset-form-title">
+              <div class="card-heading"><span class="card-step">＋</span><div><h2 id="preset-form-title">新建路径预设</h2><p>使用容易辨认的名称，方便在网站规则中选择。</p></div></div>
+              <form id="preset-form"><input id="preset-id" type="hidden" />
+                <div class="form-grid"><label class="field">预设名称<input id="preset-name" required maxlength="80" placeholder="例如：工作报表" /></label><label class="field">路径类型<select id="preset-mode"><option value="relative">相对子目录 · Chrome 默认下载目录内</option><option value="absolute">绝对路径 · Windows 指定磁盘目录</option></select></label></div>
+                <label class="field"><span id="preset-directory-label">目标子目录</span><input id="preset-directory" required maxlength="240" placeholder="例如：Work/Reports" spellcheck="false" /><span class="field-hint" id="preset-directory-hint">支持多层子目录；不支持盘符、绝对路径或 ..</span></label>
+                <div id="absolute-mode-notice" class="notice notice-warning" hidden>绝对路径需要安装 Windows 辅助程序；Chrome 下载完成后自动移动，Chrome 记录仍可能指向临时位置。辅助程序未连接时，文件保留在下载暂存位置，可安装后重试。</div>
+                <div class="directory-preview" id="directory-preview">默认下载目录 / …</div><div class="form-actions"><button class="button button-primary" type="submit" id="save-preset">保存预设</button><button class="button button-quiet" type="button" id="cancel-preset">取消编辑</button></div>
+              </form>
+            </section>
           </section>
 
-          <section id="panel-logs" data-panel="logs" aria-labelledby="logs-title" hidden><div class="page-heading"><div><p class="eyebrow">A LITTLE LESS GUESSWORK</p><h1 id="logs-title">每次分流，有迹可循。</h1><p class="page-description">查看命中的规则和相对保存路径，轻松排查配置。</p></div><button class="button button-secondary" id="clear-logs" type="button">清空记录</button></div><div class="notice notice-neutral">命中记录表示已应用路径建议，不代表文件已下载完成。这里只保留最近的分流与异常记录，清空记录不会删除已下载的文件。</div><div id="logs-list" class="log-list"></div><div id="logs-empty" class="card empty-state" hidden><span class="empty-icon" aria-hidden="true">◷</span><h3>还没有分流记录</h3><p>命中规则的下载和处理异常会显示在这里。</p></div></section>
+          <section id="panel-logs" data-panel="logs" aria-labelledby="logs-title" hidden><div class="page-heading"><div><p class="eyebrow">A LITTLE LESS GUESSWORK</p><h1 id="logs-title">每次分流，有迹可循。</h1><p class="page-description">查看命中的规则、移动结果和实际保存路径。</p></div><button class="button button-secondary" id="clear-logs" type="button">清空记录</button></div><div class="notice notice-neutral">“命中规则”表示已应用路径建议，不代表文件已下载完成。绝对路径将在下载完成后移动，“已移动”记录会展示实际位置。清空记录不会删除已下载的文件或待移动任务。</div><div id="logs-list" class="log-list"></div><div id="logs-empty" class="card empty-state" hidden><span class="empty-icon" aria-hidden="true">◷</span><h3>还没有分流记录</h3><p>命中规则的下载和处理异常会显示在这里。</p></div></section>
 
-          <section id="panel-help" data-panel="help" aria-labelledby="help-title" hidden><div class="page-heading"><div><p class="eyebrow">MAKE YOURSELF AT HOME</p><h1 id="help-title">三步，让下载井井有条。</h1><p class="page-description">设置一次，让规则替你完成重复的选择。</p></div></div><div class="help-steps"><article class="card help-step"><span class="card-step">01</span><h2>准备默认下载目录</h2><p>在 Chrome 的“设置 → 下载内容”中选择默认保存位置。如果希望普通下载自动保存，请关闭“下载前询问每个文件的保存位置”。</p><button id="open-download-settings" class="button button-secondary button-small" type="button">打开 Chrome 下载设置 ↗</button></article><article class="card help-step"><span class="card-step">02</span><h2>添加路径预设</h2><p>填写如 <code>Software</code>、<code>Work/Reports</code> 的子目录。Chrome 默认下载目录是根目录，扩展中的路径在根目录下生效。</p><a class="text-link" href="#presets">管理路径预设 →</a></article><article class="card help-step"><span class="card-step">03</span><h2>关联网站规则</h2><p>填写网站域名并选择路径预设。先用“测试匹配”检查结果，再到目标网站进行一次真实下载验证。</p><a class="text-link" href="#rules">配置网站规则 →</a></article></div><div class="card faq-card"><h2>常见情况</h2><details open><summary>为什么没有匹配到我正在浏览的网站？</summary><p>来源页面、初始下载服务器和最终下载服务器可能是三个不同的网站。规则只检查你选择的地址字段；如果网站没有提供来源地址，扩展不会根据当前标签页猜测。请尝试针对实际下载服务器添加规则。</p></details><details><summary>能直接保存到另一个盘符吗？</summary><p>此版本只支持默认下载目录下的子目录。可以在 Chrome 设置中手动更换根目录；同时分流到多个盘符需要配套本机程序，不属于此版本的功能。</p></details><details><summary>会覆盖已有文件吗？</summary><p>扩展默认让 Chrome 为重名文件自动添加编号，保留已有文件。未命中规则的下载继续沿用 Chrome 原有行为。</p></details><details><summary>另存为、网页生成的文件和其他扩展有什么影响？</summary><p>主动选择“另存为”时，以你在保存窗口中的选择为准。网页生成的 blob 文件或未提供来源信息的下载，需要在目标网站实际验证；多个修改下载文件名的扩展也可能互相影响。</p></details><details><summary>配置和下载记录会上传吗？</summary><p>扩展不连接外部服务。预设、规则与最近记录保存在本机浏览器中；导出配置时不包含下载记录。卸载扩展会删除其本机配置。</p></details></div></section>
+          <section id="panel-help" data-panel="help" aria-labelledby="help-title" hidden>
+            <div class="page-heading"><div><p class="eyebrow">MAKE YOURSELF AT HOME</p><h1 id="help-title">三步，让下载井井有条。</h1><p class="page-description">设置一次，让规则替你完成重复的选择。</p></div></div>
+            <div class="help-steps"><article class="card help-step"><span class="card-step">01</span><h2>准备默认下载目录</h2><p>在 Chrome 的“设置 → 下载内容”中选择默认保存位置。如果希望普通下载自动保存，请关闭“下载前询问每个文件的保存位置”。绝对路径也会先在下载目录暂存。</p><button id="open-download-settings" class="button button-secondary button-small" type="button">打开 Chrome 下载设置 ↗</button></article><article class="card help-step"><span class="card-step">02</span><h2>添加路径预设</h2><p>选择相对子目录（如 <code>Work/Reports</code>），或绝对路径（如 <code>D:\Work\Reports</code>）。绝对路径需要安装下方的 Windows 辅助程序。</p><a class="text-link" href="#presets">管理路径预设 →</a></article><article class="card help-step"><span class="card-step">03</span><h2>关联网站规则</h2><p>填写网站域名并选择路径预设。先用“测试匹配”检查结果，再到目标网站进行一次真实下载验证。</p><a class="text-link" href="#rules">配置网站规则 →</a></article></div>
+            <section class="card native-card" aria-labelledby="native-title">
+              <div class="native-card-heading"><div><p class="eyebrow">WINDOWS COMPANION</p><h2 id="native-title">绝对路径辅助程序</h2><p>下载完成后，将文件自动移动到指定磁盘目录。</p></div><button id="check-native-status" class="button button-secondary button-small" type="button">重新检测</button></div>
+              <div class="native-status" id="native-status" role="status" aria-live="polite"><strong id="native-status-title">正在检测辅助程序…</strong><p id="native-status-description">相对子目录功能可以正常使用，无需等待检测。</p></div>
+              <div class="native-pending"><span>待移动文件：<strong id="pending-count">0</strong> 项</span><button id="retry-pending-moves" class="button button-secondary button-small" type="button" disabled>重试待移动文件</button></div>
+              <label class="field">当前扩展 ID<div class="copy-row"><input id="extension-id" readonly value="正在读取…" spellcheck="false" /><button id="copy-extension-id" class="button button-secondary button-small" type="button">复制 ID</button></div></label>
+              <ol class="install-steps"><li>重新加载此版本的扩展，并允许其与本机辅助程序通信。</li><li>在项目目录或已解压的 Windows 辅助程序包中双击 <code>install-native.cmd</code>，粘贴上方扩展 ID；也可以在对应目录的终端中运行下方命令。已编译的辅助程序无需另装 Node.js。</li><li>安装完成后点击“重新检测”，确认连接成功。已有待移动文件可点击“重试待移动文件”。</li></ol>
+              <code id="native-install-command" class="install-command">powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-native.ps1 -ExtensionId &lt;当前扩展ID&gt;</code>
+              <p class="native-footnote">绝对路径需要安装 Windows 辅助程序；Chrome 下载完成后自动移动，Chrome 记录仍可能指向临时位置。请在“最近记录”中查看最终位置或打开文件夹。辅助程序未连接、磁盘不可用或移动失败时，原下载文件会保留，可修复后重试。</p>
+            </section>
+            <div class="card faq-card"><h2>常见情况</h2><details open><summary>为什么没有匹配到我正在浏览的网站？</summary><p>来源页面、初始下载服务器和最终下载服务器可能是三个不同的网站。规则只检查你选择的地址字段；如果网站没有提供来源地址，扩展不会根据当前标签页猜测。请尝试针对实际下载服务器添加规则。</p></details><details><summary>能保存到另一个盘符吗？</summary><p>可以。为路径预设选择“绝对路径”，填写如 D:\Work 的目录，并安装上方的 Windows 辅助程序。文件先由 Chrome 下载，完成后自动移动；这与直接将 Chrome 的下载位置切换到另一盘符不同。</p></details><details><summary>会覆盖已有文件吗？</summary><p>相对子目录中的重名文件由 Chrome 自动添加编号，绝对路径移动时也会避开已有文件。未命中规则的下载继续沿用 Chrome 原有行为。</p></details><details><summary>另存为、网页生成的文件和其他扩展有什么影响？</summary><p>相对子目录模式中，主动选择“另存为”时以保存窗口中的选择为准。命中绝对路径规则后，扩展仍会在下载完成时尝试移动文件。网页生成的 blob 文件或未提供来源信息的下载，需要在目标网站实际验证；多个修改下载文件名的扩展也可能互相影响。</p></details><details><summary>配置和下载记录会上传吗？</summary><p>扩展不连接外部服务。预设、规则与最近记录保存在本机浏览器中；辅助程序仅处理本机文件。导出配置不包含下载记录。卸载扩展会删除其本机配置，辅助程序可单独卸载。</p></details></div>
+          </section>
           <footer class="workspace-footer"><span>让每个下载，都有自己的位置。</span><span>下载路径助手 · 本机运行</span></footer>
         </div>
       </main>

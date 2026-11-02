@@ -1,16 +1,20 @@
 {
   "name": "download-path-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "按网站规则将 Chrome 下载保存到预设子目录。",
+  "description": "按网站规则将 Chrome 下载整理到子目录或 Windows 绝对路径。",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "install:native": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-native.ps1",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:browser": "node tests/browser-smoke.mjs",
+    "test:native": "npm run build:native && node --test tests/native-host.test.mjs",
+    "test:browser:native": "node tests/native-browser-smoke.mjs",
     "check": "npm run typecheck && npm test && npm run build",
-    "package": "npm run check && node scripts/package.mjs"
+    "package": "npm run check && npm run build:native && node scripts/package.mjs"
   },
   "engines": { "node": ">=22" },
   "devDependencies": {

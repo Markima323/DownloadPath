@@ -5,7 +5,7 @@ export interface DownloadLog {
   id: string;
   downloadId: number;
   timestamp: string;
-  outcome: "matched" | "invalid" | "error";
+  outcome: "matched" | "invalid" | "error" | "moved" | "move_error";
   filename: string;
   ruleName?: string;
   presetName?: string;
@@ -13,6 +13,8 @@ export interface DownloadLog {
   source?: MatchSource;
   domain?: string;
   message?: string;
+  jobId?: string;
+  finalPath?: string;
 }
 
 export interface SettingsState {
@@ -27,6 +29,8 @@ export interface HandlerDependencies {
   getSettings: () => Promise<SettingsState>;
   appendLog: (log: DownloadLog) => Promise<void>;
   timeoutMs?: number;
+  prepareAbsolute?: (download: Download, result: Extract<ReturnType<typeof resolveDownload>, { kind: "matched" }>) => Promise<{ jobId: string; relativePath: string }>;
+  abandonAbsolute?: (jobId: string) => Promise<void>;
 }
 
 export function createDownloadHandler(dependencies: HandlerDependencies) {
@@ -58,7 +62,7 @@ export function createDownloadHandler(dependencies: HandlerDependencies) {
       if (finish()) record({ outcome: "error", message: "读取规则超时，已沿用 Chrome 默认下载位置。" });
     }, dependencies.timeoutMs ?? 1500);
 
-    void Promise.resolve().then(() => dependencies.getSettings()).then((state) => {
+    void Promise.resolve().then(() => dependencies.getSettings()).then(async (state) => {
       if (finished) return;
       if (state.configError) {
         finish();
@@ -67,12 +71,26 @@ export function createDownloadHandler(dependencies: HandlerDependencies) {
       }
       const result = resolveDownload(state.settings, download);
       if (result.kind === "matched") {
-        finish({ filename: result.relativePath, conflictAction: "uniquify" });
+        let relativePath = result.relativePath;
+        let jobId: string | undefined;
+        if (result.absoluteDirectory) {
+          if (!dependencies.prepareAbsolute) throw new Error("绝对路径处理程序不可用，请重新加载扩展。");
+          const prepared = await dependencies.prepareAbsolute(download, result);
+          if (finished) {
+            // 超时已沿用默认位置，不能保留一个可能移动用户另存为文件的任务。
+            await dependencies.abandonAbsolute?.(prepared.jobId);
+            return;
+          }
+          relativePath = prepared.relativePath;
+          jobId = prepared.jobId;
+        }
+        finish({ filename: relativePath, conflictAction: "uniquify" });
         record({
           outcome: "matched",
           ruleName: result.rule.name,
           presetName: result.preset.name,
-          relativePath: result.relativePath,
+          relativePath,
+          ...(jobId ? { jobId, message: "等待下载完成后移动到绝对路径。" } : {}),
           source: result.rule.source,
           domain: result.rule.domain,
         });

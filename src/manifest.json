@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "下载路径助手",
-  "description": "为网站关联下载目录预设，自动整理下载文件。配置保存在本机。",
-  "version": "0.1.0",
+  "description": "按网站自动整理下载，支持子目录和配套 Windows 程序的绝对路径。",
+  "version": "0.2.0",
   "minimum_chrome_version": "120",
-  "permissions": ["downloads", "storage"],
+  "permissions": ["downloads", "storage", "nativeMessaging"],
   "background": {
     "service_worker": "background/index.js",
     "type": "module"

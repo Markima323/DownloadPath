@@ -4,6 +4,7 @@ export interface Preset {
   id: string;
   name: string;
   subdirectory: string;
+  mode?: "relative" | "absolute";
 }
 
 export interface DownloadRule {
@@ -37,6 +38,7 @@ export type ResolveResult =
       rule: DownloadRule;
       preset: Preset;
       relativePath: string;
+      absoluteDirectory?: string;
     }
   | { kind: "disabled" | "unmatched" | "invalid"; reason?: string };
 
@@ -48,11 +50,12 @@ export const SETTINGS_VERSION = 1;
 export const MAX_PRESETS = 100;
 export const MAX_RULES = 500;
 export const MAX_SUBDIRECTORY_LENGTH = 240;
+export const MAX_ABSOLUTE_DIRECTORY_LENGTH = 2000;
 
 const SOURCES: readonly MatchSource[] = ["referrer", "url", "finalUrl"];
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const ILLEGAL_WINDOWS_CHARS = /[<>:"|?*\u0000-\u001f\u007f]/;
-const RESERVED_WINDOWS_NAME = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3]) *(?:\.|$)/i;
+const RESERVED_WINDOWS_NAME = /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3]) *(?:\.|$)/i;
 
 /** Fresh objects on every call: editing defaults must not leak into other callers. */
 export function createDefaultSettings(): Settings {
@@ -145,6 +148,45 @@ export function validateSubdirectory(input: string): string[] {
   return errors;
 }
 
+/** Validate local Windows drive paths without resolving or repairing components. */
+export function validateAbsoluteDirectory(input: string): string[] {
+  if (typeof input !== "string" || !input.length) return ["绝对路径不能为空。"];
+  const path = input.replace(/\//g, "\\");
+  const errors: string[] = [];
+  if (path.length > MAX_ABSOLUTE_DIRECTORY_LENGTH) {
+    errors.push(`绝对路径不能超过 ${MAX_ABSOLUTE_DIRECTORY_LENGTH} 个字符。`);
+  }
+  if (!/^[a-z]:\\/i.test(path)) {
+    errors.push("请填写带盘符的本机绝对路径，例如 D:\\Work；不支持 UNC、设备路径或盘符相对路径。");
+    return errors;
+  }
+  if (path.length === 3) return errors; // A drive root such as D:\ is valid.
+  const parts = path.slice(3).split("\\");
+  // Accept a single trailing separator; leave other empty components to validation.
+  if (parts.at(-1) === "") parts.pop();
+  if (parts.some((part) => !part)) errors.push("绝对路径不能包含连续的目录分隔符。");
+  if (parts.some((part) => part === "." || part === "..")) errors.push("绝对路径不能包含 . 或 .. 路径片段。");
+  if (parts.some((part) => part.length > 255)) errors.push("每一级目录名不能超过 255 个字符。");
+  if (parts.some((part) => ILLEGAL_WINDOWS_CHARS.test(part))) {
+    errors.push('目录名不能包含 < > : " | ? * 或控制字符。');
+  }
+  if (parts.some((part) => /[. ]$/.test(part))) errors.push("每一级目录名不能以空格或句点结尾。");
+  if (parts.some((part) => RESERVED_WINDOWS_NAME.test(part))) {
+    errors.push("目录不能使用 CON、NUL、COM1 等 Windows 保留名称。");
+  }
+  return errors;
+}
+
+/** Canonicalize valid paths only, so dangerous input is never silently repaired. */
+export function normalizeAbsoluteDirectory(input: string): string {
+  const errors = validateAbsoluteDirectory(input);
+  if (errors.length) throw new Error(errors.join("；"));
+  let path = input.replace(/\//g, "\\");
+  path = path[0]!.toUpperCase() + path.slice(1);
+  if (path.length > 3 && path.endsWith("\\")) path = path.slice(0, -1);
+  return path;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -205,22 +247,31 @@ export function validateSettings(input: unknown): SettingsValidation {
       continue;
     }
     const before = errors.length;
-    unexpectedFields(value, ["id", "name", "subdirectory"], label, errors);
+    unexpectedFields(value, ["id", "name", "subdirectory", "mode"], label, errors);
     if (validateId(value.id, label, errors)) {
       if (presetIds.has(value.id)) errors.push(`${label}标识重复。`);
       presetIds.add(value.id);
     }
     validateName(value.name, label, errors);
+    if (value.mode !== undefined && value.mode !== "relative" && value.mode !== "absolute") {
+      errors.push(`${label}路径模式必须为 relative 或 absolute。`);
+    }
     if (typeof value.subdirectory !== "string") {
-      errors.push(`${label}目标子目录必须为文本。`);
+      errors.push(`${label}目标目录必须为文本。`);
     } else {
-      errors.push(...validateSubdirectory(value.subdirectory).map((error) => label + error));
+      const pathErrors = value.mode === "absolute"
+        ? validateAbsoluteDirectory(value.subdirectory)
+        : validateSubdirectory(value.subdirectory);
+      errors.push(...pathErrors.map((error) => label + error));
     }
     if (errors.length === before) {
       presets.push({
         id: value.id as string,
         name: (value.name as string).trim(),
-        subdirectory: normalizeSubdirectory(value.subdirectory as string),
+        subdirectory: value.mode === "absolute"
+          ? normalizeAbsoluteDirectory(value.subdirectory as string)
+          : normalizeSubdirectory(value.subdirectory as string),
+        ...(value.mode !== undefined ? { mode: value.mode as "relative" | "absolute" } : {}),
       });
     }
   }
@@ -332,10 +383,24 @@ export function resolveDownload(settings: Settings, context: DownloadContext): R
   if (!selected) return { kind: "unmatched" };
   const preset = settings.presets.find((entry) => entry.id === selected.presetId);
   if (!preset) return { kind: "invalid", reason: "规则关联的路径预设不存在。" };
-  const pathErrors = validateSubdirectory(preset.subdirectory);
+  if (preset.mode !== undefined && preset.mode !== "relative" && preset.mode !== "absolute") {
+    return { kind: "invalid", reason: "路径预设的模式无效。" };
+  }
+  const pathErrors = preset.mode === "absolute"
+    ? validateAbsoluteDirectory(preset.subdirectory)
+    : validateSubdirectory(preset.subdirectory);
   if (pathErrors.length) return { kind: "invalid", reason: pathErrors[0] };
   const filename = safeBasename(context.filename);
   if (!filename) return { kind: "invalid", reason: "无法生成有效的目标文件名。" };
+  if (preset.mode === "absolute") {
+    return {
+      kind: "matched",
+      rule: selected,
+      preset,
+      relativePath: filename,
+      absoluteDirectory: normalizeAbsoluteDirectory(preset.subdirectory),
+    };
+  }
   return {
     kind: "matched",
     rule: selected,

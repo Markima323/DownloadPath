@@ -1,4 +1,4 @@
-import { displayDate, errorMessage, getState, setEnabled, type ExtensionState } from "../ui/client";
+import { displayDate, errorMessage, getNativeStatus, getState, setEnabled, type ExtensionState, type NativeStatus } from "../ui/client";
 
 function element<T extends HTMLElement>(id: string): T {
   const result = document.getElementById(id);
@@ -11,12 +11,24 @@ let busy = false;
 let writeGeneration = 0;
 let refreshing = false;
 let refreshAgain = false;
+let nativeStatus: NativeStatus | undefined;
 const enabled = element<HTMLInputElement>("enabled");
 
 function showError(message: string): void {
   element("error").textContent = message;
   element("error").hidden = false;
   element("retry").hidden = false;
+}
+
+function renderNativeNote(): void {
+  const note = element("native-note");
+  const absolute = state?.settings.presets.some((preset) => preset.mode === "absolute");
+  const pendingCount = state?.pendingCount ?? 0;
+  note.hidden = !absolute && pendingCount === 0;
+  note.classList.toggle("connected", nativeStatus?.available === true);
+  note.textContent = nativeStatus?.available
+    ? `绝对路径辅助程序已连接。${pendingCount ? `${pendingCount} 项待移动，可在设置中查看或重试。` : "文件将在下载完成后自动移动。"}`
+    : nativeStatus ? "绝对路径辅助程序尚未连接。下载文件会保留，请在设置的“使用帮助”中安装并重试。" : "正在检测绝对路径辅助程序；相对子目录功能可正常使用。";
 }
 
 function render(): void {
@@ -28,7 +40,7 @@ function render(): void {
   element("status-description").textContent = state.settings.enabled ? "新下载将按网站规则保存" : "下载将沿用 Chrome 默认行为";
   element("rule-count").textContent = String(state.settings.rules.filter((rule) => rule.enabled).length);
   element("preset-count").textContent = String(state.settings.presets.length);
-  const recent = state.logs.find((log) => log.outcome === "matched");
+  const recent = state.logs.find((log) => log.outcome === "moved" || log.outcome === "matched");
   const container = element("recent");
   container.replaceChildren();
   element("recent-time").textContent = recent ? displayDate(recent.timestamp) : "";
@@ -37,9 +49,9 @@ function render(): void {
     name.textContent = recent.filename || "下载文件";
     const rule = document.createElement("span");
     rule.className = "rule";
-    rule.textContent = `${recent.ruleName ?? "已命中规则"} → ${recent.presetName ?? "路径预设"}`;
+    rule.textContent = `${recent.outcome === "moved" ? "已移动 · " : recent.jobId ? "等待下载完成后移动 · " : ""}${recent.ruleName ?? "已命中规则"} → ${recent.presetName ?? "路径预设"}`;
     const path = document.createElement("code");
-    path.textContent = recent.relativePath ? `默认下载目录 / ${recent.relativePath}` : "";
+    path.textContent = recent.outcome === "moved" && recent.finalPath ? recent.finalPath : recent.relativePath ? `${recent.jobId ? "暂存位置：默认下载目录" : "默认下载目录"} / ${recent.relativePath}` : "";
     container.append(name, rule, path);
   } else {
     const placeholder = document.createElement("span");
@@ -48,6 +60,7 @@ function render(): void {
     container.append(placeholder);
   }
   if (state.configError) showError(`配置需要检查：${state.configError}`);
+  renderNativeNote();
 }
 
 async function refresh(): Promise<void> {
@@ -83,7 +96,7 @@ enabled.addEventListener("change", () => {
   void (async () => {
     try {
       const saved = await setEnabled(next);
-      state = { ...saved, logs: state?.logs ?? [] };
+      state = { ...saved, logs: state?.logs ?? [], pendingCount: state?.pendingCount };
       element("error").hidden = true;
       element("retry").hidden = true;
       render();
@@ -105,3 +118,7 @@ element("open-settings").addEventListener("click", () => {
 element("retry").addEventListener("click", () => { void refresh(); });
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) chrome.storage.onChanged.addListener((_changes, areaName) => { if (areaName === "local") void refresh(); });
 void refresh();
+void getNativeStatus().then((status) => { nativeStatus = status; renderNativeNote(); }).catch((error: unknown) => {
+  nativeStatus = { available: false, extensionId: "", error: errorMessage(error) };
+  renderNativeNote();
+});

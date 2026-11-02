@@ -4,7 +4,8 @@
   "presets": [
     { "id": "software", "name": "软件", "subdirectory": "Software" },
     { "id": "documents", "name": "文档", "subdirectory": "Documents" },
-    { "id": "images", "name": "图片", "subdirectory": "Images" }
+    { "id": "images", "name": "图片", "subdirectory": "Images" },
+    { "id": "absolute-reports", "name": "绝对路径报表（修改盘符）", "mode": "absolute", "subdirectory": "D:\\工作\\报表" }
   ],
   "rules": [
     {

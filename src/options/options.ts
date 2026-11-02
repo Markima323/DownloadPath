@@ -1,15 +1,19 @@
 import {
+  MAX_ABSOLUTE_DIRECTORY_LENGTH,
+  MAX_SUBDIRECTORY_LENGTH,
   normalizeDomain,
+  normalizeAbsoluteDirectory,
   normalizeSubdirectory,
   resolveDownload,
   validateSettings,
+  validateAbsoluteDirectory,
   validateSubdirectory,
   type DownloadRule,
   type MatchSource,
   type Preset,
   type Settings,
 } from "../shared/index";
-import { clearLogs, displayDate, errorMessage, getState, saveSettings, setEnabled, sourceLabel, type ExtensionState } from "../ui/client";
+import { clearLogs, displayDate, errorMessage, getNativeStatus, getState, retryMove, retryPendingMoves, revealFile, saveSettings, setEnabled, sourceLabel, type ExtensionState, type NativeStatus } from "../ui/client";
 
 function element<T extends HTMLElement>(id: string): T {
   const result = document.getElementById(id);
@@ -38,6 +42,8 @@ let writeGeneration = 0;
 let refreshing = false;
 let refreshAgain = false;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+let nativeStatus: NativeStatus | undefined;
+let nativeChecking = false;
 const enabled = element<HTMLInputElement>("global-enabled");
 const ruleForm = element<HTMLFormElement>("rule-form");
 const presetForm = element<HTMLFormElement>("preset-form");
@@ -60,6 +66,57 @@ function updateBusy(): void {
   element<HTMLButtonElement>("save-preset").disabled = writing || !state;
   element<HTMLButtonElement>("export-config").disabled = writing || !state;
   element<HTMLButtonElement>("import-config").disabled = writing || !state;
+  element<HTMLButtonElement>("check-native-status").disabled = writing || nativeChecking;
+  element<HTMLButtonElement>("retry-pending-moves").disabled = writing || !state?.pendingCount;
+  element<HTMLButtonElement>("copy-extension-id").disabled = writing || !/^[a-p]{32}$/.test(element<HTMLInputElement>("extension-id").value);
+}
+
+function presetModeLabel(preset: Preset): string {
+  return preset.mode === "absolute" ? "绝对路径" : "相对子目录";
+}
+
+function renderNativeStatus(): void {
+  const extensionId = nativeStatus?.extensionId ?? (typeof chrome !== "undefined" ? chrome.runtime?.id : undefined);
+  if (extensionId) {
+    element<HTMLInputElement>("extension-id").value = extensionId;
+    element("native-install-command").textContent = `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-native.ps1 -ExtensionId ${extensionId}`;
+  }
+  const pendingCount = state?.pendingCount ?? 0;
+  element("pending-count").textContent = String(pendingCount);
+  const status = element("native-status");
+  status.classList.toggle("connected", nativeStatus?.available === true);
+  if (nativeChecking || !nativeStatus) {
+    element("native-status-title").textContent = "正在检测辅助程序…";
+    element("native-status-description").textContent = "相对子目录功能可以正常使用，无需等待检测。";
+  } else if (nativeStatus.available) {
+    element("native-status-title").textContent = `已连接 Windows 辅助程序${nativeStatus.version ? ` · ${nativeStatus.version}` : ""}`;
+    element("native-status-description").textContent = "绝对路径将在 Chrome 下载完成后自动移动；移动成功后可在最近记录中打开最终文件夹。";
+  } else {
+    element("native-status-title").textContent = "辅助程序尚未连接";
+    element("native-status-description").textContent = `${nativeStatus.error ?? "请按下方步骤安装后重新检测。"} 未移动的下载文件会保留，可在连接成功后重试。`;
+  }
+  const warning = element("native-warning");
+  warning.hidden = !state?.settings.presets.some((preset) => preset.mode === "absolute") && pendingCount === 0;
+  warning.classList.toggle("notice-warning", !nativeStatus?.available);
+  warning.classList.toggle("notice-neutral", nativeStatus?.available === true);
+  element("native-warning-title").textContent = nativeStatus?.available ? "绝对路径支持已就绪" : nativeChecking || !nativeStatus ? "正在检查绝对路径支持…" : "绝对路径需要 Windows 辅助程序";
+  element("native-warning-description").textContent = nativeStatus?.available
+    ? `文件将在下载完成后自动移动。${pendingCount ? `当前有 ${pendingCount} 项待移动，可前往帮助中重试。` : "移动后的实际位置会显示在最近记录中。"}`
+    : `你可以先保存绝对路径预设。辅助程序未连接时，文件保留在下载暂存位置；安装并检测成功后可重试。${pendingCount ? `当前有 ${pendingCount} 项待移动。` : ""}`;
+  updateBusy();
+}
+
+async function checkNativeStatus(): Promise<void> {
+  if (nativeChecking) return;
+  nativeChecking = true;
+  renderNativeStatus();
+  try { nativeStatus = await getNativeStatus(); }
+  catch (error) {
+    nativeStatus = { available: false, extensionId: typeof chrome !== "undefined" ? chrome.runtime?.id ?? "" : "", error: errorMessage(error) };
+  } finally {
+    nativeChecking = false;
+    renderNativeStatus();
+  }
 }
 
 function showRoute(): void {
@@ -87,7 +144,7 @@ function renderSummary(): void {
   element("stat-presets").textContent = String(settings.presets.length);
   element("nav-rule-count").textContent = String(settings.rules.length);
   element("nav-preset-count").textContent = String(settings.presets.length);
-  const latest = logs.find((log) => log.outcome === "matched");
+  const latest = logs.find((log) => log.outcome === "matched" || log.outcome === "moved");
   element("stat-last-match").textContent = latest ? displayDate(latest.timestamp).slice(0, -3) : "暂无";
   const warning = element("config-warning");
   warning.hidden = !state.configError;
@@ -108,8 +165,9 @@ function renderRules(): void {
     const presetCell = node("td");
     const preset = state.settings.presets.find((entry) => entry.id === rule.presetId);
     const tag = node("span", "preset-tag", preset?.name ?? "预设不存在");
-    if (preset) tag.title = preset.subdirectory;
+    if (preset) tag.title = `${presetModeLabel(preset)} · ${preset.subdirectory}`;
     presetCell.append(tag);
+    if (preset) presetCell.append(node("span", "rule-detail target-detail", `${presetModeLabel(preset)} · ${preset.subdirectory}`));
     const priority = node("td", "priority", String(rule.priority));
     const statusCell = node("td");
     const status = node("button", `status-pill${rule.enabled ? "" : " paused"}`, rule.enabled ? "已启用" : "已暂停");
@@ -143,7 +201,7 @@ function renderPresets(): void {
     const actions = node("div");
     actions.append(action("编辑", `编辑预设“${preset.name}”`, () => editPreset(preset)), action("删除", `删除预设“${preset.name}”`, () => { void removePreset(preset); }, true));
     footer.append(node("span", "preset-usage", `${count} 条关联规则`), actions);
-    card.append(mark, node("h3", undefined, preset.name), node("p", "preset-path", preset.subdirectory), footer);
+    card.append(mark, node("span", `mode-label${preset.mode === "absolute" ? " absolute" : ""}`, presetModeLabel(preset)), node("h3", undefined, preset.name), node("p", "preset-path", preset.subdirectory), footer);
     list.append(card);
   }
   const selected = rulePreset.value;
@@ -154,7 +212,7 @@ function renderPresets(): void {
     rulePreset.append(option);
   } else {
     for (const preset of state.settings.presets) {
-      const option = node("option", undefined, `${preset.name} · ${preset.subdirectory}`);
+      const option = node("option", undefined, `${preset.name} · ${presetModeLabel(preset)} · ${preset.subdirectory}`);
       option.value = preset.id;
       rulePreset.append(option);
     }
@@ -169,18 +227,28 @@ function renderLogs(): void {
   element("logs-empty").hidden = state.logs.length > 0;
   for (const log of state.logs) {
     const card = node("article", "card log-card");
-    const mark = node("span", `log-icon${log.outcome === "matched" ? "" : " error"}`, log.outcome === "matched" ? "✓" : "!");
+    const success = log.outcome === "matched" || log.outcome === "moved";
+    const mark = node("span", `log-icon${success ? "" : " error"}`, log.outcome === "moved" ? "↗" : success ? "✓" : "!");
     mark.setAttribute("aria-hidden", "true");
     const content = node("div", "log-content");
     const title = node("div", "log-title");
     const time = node("time", undefined, displayDate(log.timestamp));
     time.dateTime = log.timestamp;
     title.append(node("span", undefined, log.filename || "下载文件"), time);
-    const description = log.outcome === "matched"
-      ? `${log.ruleName ?? "已命中规则"} → ${log.presetName ?? "路径预设"}${log.source ? ` · ${sourceLabel(log.source)}` : ""}${log.domain ? ` · ${log.domain}` : ""}`
-      : log.message ?? "未能应用路径，请检查规则设置。";
+    const description = log.outcome === "matched" || log.outcome === "moved"
+      ? `${log.outcome === "moved" ? "已移动 · " : log.jobId ? "等待下载完成后移动 · " : "命中规则 · "}${log.ruleName ?? "网站规则"} → ${log.presetName ?? "路径预设"}${log.source ? ` · ${sourceLabel(log.source)}` : ""}${log.domain ? ` · ${log.domain}` : ""}`
+      : `${log.outcome === "move_error" ? "移动失败 · " : ""}${log.message ?? "未能应用路径，请检查规则设置。"}`;
     content.append(title, node("p", "log-description", description));
-    if (log.relativePath) content.append(node("span", "log-path", `默认下载目录 / ${log.relativePath}`));
+    if (log.outcome === "moved" && log.finalPath) content.append(node("span", "log-path", log.finalPath));
+    else if (log.relativePath) content.append(node("span", "log-path", `${log.jobId ? "暂存位置：默认下载目录" : "默认下载目录"} / ${log.relativePath}`));
+    if (log.outcome === "moved" && log.finalPath) {
+      const finalPath = log.finalPath;
+      content.append(action("打开文件夹 ↗", `打开“${log.filename}”所在文件夹`, () => { void runLogAction(() => revealFile(finalPath), "已请求打开文件夹"); }));
+    }
+    if (log.outcome === "move_error" && log.jobId) {
+      const jobId = log.jobId;
+      content.append(action("重试移动 →", `重试移动“${log.filename}”`, () => { void runLogAction(() => retryMove(jobId), "已提交重试，请查看后续移动结果"); }));
+    }
     card.append(mark, content);
     list.append(card);
   }
@@ -191,6 +259,7 @@ function render(): void {
   renderRules();
   renderPresets();
   renderLogs();
+  renderNativeStatus();
   updateBusy();
 }
 
@@ -225,7 +294,7 @@ async function mutate(change: (settings: Settings) => void, success: string): Pr
     const next = structuredClone(latest.settings);
     change(next);
     const saved = await saveSettings(next, latest.revision);
-    state = { ...saved, logs: latest.logs };
+    state = { ...saved, logs: latest.logs, pendingCount: latest.pendingCount };
     render();
     notify(success);
     return true;
@@ -236,6 +305,23 @@ async function mutate(change: (settings: Settings) => void, success: string): Pr
     writing = false;
     updateBusy();
     if (refreshAgain) { refreshAgain = false; void refresh(); }
+  }
+}
+
+async function runLogAction(operation: () => Promise<void | string>, success: string): Promise<void> {
+  if (writing) return;
+  writing = true;
+  writeGeneration++;
+  updateBusy();
+  try {
+    const result = await operation();
+    notify(typeof result === "string" ? result : success);
+  } catch (error) { notify(errorMessage(error), true); }
+  finally {
+    writing = false;
+    updateBusy();
+    refreshAgain = false;
+    void refresh();
   }
 }
 
@@ -276,6 +362,7 @@ function editPreset(preset: Preset): void {
   element<HTMLInputElement>("preset-id").value = preset.id;
   element<HTMLInputElement>("preset-name").value = preset.name;
   element<HTMLInputElement>("preset-directory").value = preset.subdirectory;
+  element<HTMLSelectElement>("preset-mode").value = preset.mode ?? "relative";
   element("preset-form-title").textContent = "编辑路径预设";
   updateDirectoryPreview();
   focusEditor("preset-name");
@@ -314,7 +401,13 @@ async function removePreset(preset: Preset): Promise<void> {
 
 function updateDirectoryPreview(): void {
   const directory = element<HTMLInputElement>("preset-directory").value;
-  element("directory-preview").textContent = `默认下载目录 / ${directory ? directory.replaceAll("\\", "/") : "…"}`;
+  const absolute = element<HTMLSelectElement>("preset-mode").value === "absolute";
+  element<HTMLInputElement>("preset-directory").maxLength = absolute ? MAX_ABSOLUTE_DIRECTORY_LENGTH : MAX_SUBDIRECTORY_LENGTH;
+  element("preset-directory-label").textContent = absolute ? "Windows 目标目录" : "目标子目录";
+  element<HTMLInputElement>("preset-directory").placeholder = absolute ? "例如：D:\\Work\\Reports" : "例如：Work/Reports";
+  element("preset-directory-hint").textContent = absolute ? "填写包含盘符的完整目录，支持不同磁盘，例如 D:\\Work 或 E:\\Software。" : "支持多层子目录；不支持盘符、绝对路径或 ..";
+  element("absolute-mode-notice").hidden = !absolute;
+  element("directory-preview").textContent = absolute ? `下载完成后移动到：${directory || "…"}` : `默认下载目录 / ${directory ? directory.replaceAll("\\", "/") : "…"}`;
 }
 
 ruleForm.addEventListener("submit", (event) => {
@@ -350,12 +443,14 @@ presetForm.addEventListener("submit", (event) => {
     try {
       const id = element<HTMLInputElement>("preset-id").value;
       const rawDirectory = element<HTMLInputElement>("preset-directory").value;
-      const errors = validateSubdirectory(rawDirectory);
+      const mode = element<HTMLSelectElement>("preset-mode").value === "absolute" ? "absolute" : "relative";
+      const errors = mode === "absolute" ? validateAbsoluteDirectory(rawDirectory) : validateSubdirectory(rawDirectory);
       if (errors.length) throw new Error(errors.join("；"));
       const preset: Preset = {
         id: id || crypto.randomUUID(),
         name: element<HTMLInputElement>("preset-name").value.trim(),
-        subdirectory: normalizeSubdirectory(rawDirectory),
+        subdirectory: mode === "absolute" ? normalizeAbsoluteDirectory(rawDirectory) : normalizeSubdirectory(rawDirectory),
+        mode,
       };
       const saved = await mutate((settings) => {
         if (id) {
@@ -376,7 +471,7 @@ async function toggleEnabled(next: boolean): Promise<void> {
   updateBusy();
   try {
     const saved = await setEnabled(next);
-    state = { ...saved, logs: state.logs };
+    state = { ...saved, logs: state.logs, pendingCount: state.pendingCount };
     render();
     notify(next ? "自动分流已开启" : "自动分流已暂停");
   } catch (error) {
@@ -403,7 +498,9 @@ element("test-form").addEventListener("submit", (event) => {
     const result = resolveDownload(state.settings, { url, finalUrl, referrer, filename: element<HTMLInputElement>("test-filename").value });
     if (result.kind === "matched") {
       output.className = "test-result success";
-      output.append(node("strong", undefined, `✓ 命中“${result.rule.name}”`), node("span", undefined, `${sourceLabel(result.rule.source)} · ${result.preset.name}`), node("code", undefined, `默认下载目录 / ${result.relativePath}`));
+      const targetPath = result.absoluteDirectory ? `${result.absoluteDirectory.replace(/\\$/, "")}\\${result.relativePath}` : `默认下载目录 / ${result.relativePath}`;
+      output.append(node("strong", undefined, `✓ 命中“${result.rule.name}”`), node("span", undefined, `${sourceLabel(result.rule.source)} · ${result.preset.name}${result.absoluteDirectory ? " · 下载完成后移动" : ""}`), node("code", undefined, targetPath));
+      if (result.absoluteDirectory && !nativeStatus?.available) output.append(node("p", "test-native-note", "此预设需要 Windows 辅助程序。请在“使用帮助”中完成安装与检测；未连接时文件会保留在下载暂存位置。"));
     } else {
       output.className = result.kind === "invalid" ? "test-result error" : "test-result neutral";
       output.append(node("strong", undefined, result.kind === "disabled" ? "自动分流已暂停" : result.kind === "invalid" ? "当前配置无法应用" : "没有命中规则"), node("span", undefined, result.reason || (result.kind === "unmatched" ? "此次下载将沿用 Chrome 默认行为。请检查匹配依据和域名。" : "开启自动分流后，再次运行测试。")));
@@ -466,6 +563,20 @@ element("new-preset").addEventListener("click", () => { resetPreset(); focusEdit
 element("cancel-rule").addEventListener("click", resetRule);
 element("cancel-preset").addEventListener("click", resetPreset);
 element("preset-directory").addEventListener("input", updateDirectoryPreview);
+element("preset-mode").addEventListener("change", updateDirectoryPreview);
+element("check-native-status").addEventListener("click", () => { void checkNativeStatus(); });
+element("retry-pending-moves").addEventListener("click", () => {
+  void runLogAction(async () => {
+    const count = await retryPendingMoves();
+    return count ? `已提交 ${count} 项移动重试，请查看最近记录。` : "当前没有可以重试的文件，尚未下载完成的文件会在完成后处理。";
+  }, "已提交移动重试");
+});
+element("copy-extension-id").addEventListener("click", () => {
+  const input = element<HTMLInputElement>("extension-id");
+  void navigator.clipboard.writeText(input.value).then(() => notify("扩展 ID 已复制")).catch(() => {
+    input.focus(); input.select(); notify("无法自动复制，请复制已选中的扩展 ID。", true);
+  });
+});
 element("retry-load").addEventListener("click", () => { void refresh(); });
 window.addEventListener("hashchange", showRoute);
 window.addEventListener("focus", () => { void refresh(); });
@@ -473,3 +584,4 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) chrome.storage.o
 showRoute();
 updateBusy();
 void refresh();
+void checkNativeStatus();

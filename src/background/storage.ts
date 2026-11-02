@@ -80,11 +80,11 @@ export class SettingsRepository {
 function isLog(value: unknown): value is DownloadLog {
   if (typeof value !== "object" || value === null) return false;
   const log = value as Record<string, unknown>;
-  const optionalStrings = ["ruleName", "presetName", "relativePath", "domain", "message"];
+  const optionalStrings = ["ruleName", "presetName", "relativePath", "domain", "message", "finalPath", "jobId"];
   return typeof log.id === "string" && typeof log.downloadId === "number"
     && Number.isFinite(log.downloadId) && typeof log.timestamp === "string"
     && Number.isFinite(Date.parse(log.timestamp)) && typeof log.filename === "string"
-    && ["matched", "invalid", "error"].includes(log.outcome as string)
+    && ["matched", "invalid", "error", "moved", "move_error"].includes(log.outcome as string)
     && (log.source === undefined || ["referrer", "url", "finalUrl"].includes(log.source as string))
     && optionalStrings.every((key) => log[key] === undefined || typeof log[key] === "string");
 }
@@ -105,7 +105,7 @@ export class LogRepository {
   append(log: DownloadLog): Promise<void> {
     return this.enqueue(async () => {
       const logs = await this.read();
-      await chrome.storage.local.set({ [LOGS_KEY]: [log, ...logs].slice(0, MAX_LOGS) });
+      await chrome.storage.local.set({ [LOGS_KEY]: [log, ...logs.filter((entry) => entry.id !== log.id)].slice(0, MAX_LOGS) });
     });
   }
 

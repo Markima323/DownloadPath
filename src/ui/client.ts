@@ -4,7 +4,7 @@ export interface DownloadLog {
   id: string;
   downloadId: number;
   timestamp: string;
-  outcome: "matched" | "invalid" | "error";
+  outcome: "matched" | "invalid" | "error" | "moved" | "move_error";
   filename: string;
   ruleName?: string;
   presetName?: string;
@@ -12,6 +12,8 @@ export interface DownloadLog {
   source?: MatchSource;
   domain?: string;
   message?: string;
+  finalPath?: string;
+  jobId?: string;
 }
 
 export interface ExtensionState {
@@ -19,11 +21,19 @@ export interface ExtensionState {
   logs: DownloadLog[];
   revision: string;
   configError?: string;
+  pendingCount?: number;
 }
 
 export interface SettingsSnapshot {
   settings: Settings;
   revision: string;
+}
+
+export interface NativeStatus {
+  available: boolean;
+  extensionId: string;
+  version?: string;
+  error?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -56,8 +66,8 @@ function readLogs(value: unknown): DownloadLog[] {
   return value.filter((entry): entry is DownloadLog => {
     if (!isRecord(entry)) return false;
     if (typeof entry.id !== "string" || typeof entry.downloadId !== "number" || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) return false;
-    if (!["matched", "invalid", "error"].includes(String(entry.outcome)) || typeof entry.filename !== "string") return false;
-    for (const key of ["ruleName", "presetName", "relativePath", "domain", "message"]) {
+    if (!["matched", "invalid", "error", "moved", "move_error"].includes(String(entry.outcome)) || typeof entry.filename !== "string") return false;
+    for (const key of ["ruleName", "presetName", "relativePath", "domain", "message", "finalPath", "jobId"]) {
       if (entry[key] !== undefined && typeof entry[key] !== "string") return false;
     }
     return entry.source === undefined || ["referrer", "url", "finalUrl"].includes(String(entry.source));
@@ -85,6 +95,7 @@ export async function getState(): Promise<ExtensionState> {
     settings: result.settings,
     logs: readLogs(response.logs),
     revision: readRevision(response.revision),
+    pendingCount: typeof response.pendingCount === "number" && Number.isSafeInteger(response.pendingCount) && response.pendingCount >= 0 ? response.pendingCount : 0,
     ...(typeof response.configError === "string" ? { configError: response.configError } : {}),
   };
 }
@@ -99,6 +110,32 @@ export async function saveSettings(settings: Settings, revision: string): Promis
 export async function setEnabled(enabled: boolean): Promise<SettingsSnapshot> {
   const response = await request({ type: "SET_ENABLED", enabled });
   return readSnapshot(response);
+}
+
+export async function getNativeStatus(): Promise<NativeStatus> {
+  const response = await request({ type: "GET_NATIVE_STATUS" });
+  if (typeof response.available !== "boolean" || typeof response.extensionId !== "string" || !/^[a-p]{32}$/.test(response.extensionId)) {
+    throw new Error("辅助程序状态无法读取，请重新检测。");
+  }
+  return {
+    available: response.available,
+    extensionId: response.extensionId,
+    ...(typeof response.version === "string" ? { version: response.version } : {}),
+    ...(typeof response.error === "string" ? { error: response.error } : {}),
+  };
+}
+
+export async function retryMove(jobId: string): Promise<void> {
+  await request({ type: "RETRY_MOVE", jobId });
+}
+
+export async function retryPendingMoves(): Promise<number> {
+  const response = await request({ type: "RETRY_PENDING_MOVES" });
+  return typeof response.count === "number" && Number.isSafeInteger(response.count) && response.count >= 0 ? response.count : 0;
+}
+
+export async function revealFile(path: string): Promise<void> {
+  await request({ type: "REVEAL_FILE", path });
 }
 
 export async function clearLogs(): Promise<void> {
