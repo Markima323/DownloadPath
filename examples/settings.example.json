@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "enabled": true,
+  "presets": [
+    { "id": "software", "name": "软件", "subdirectory": "Software" },
+    { "id": "documents", "name": "文档", "subdirectory": "Documents" },
+    { "id": "images", "name": "图片", "subdirectory": "Images" }
+  ],
+  "rules": [
+    {
+      "id": "example-report",
+      "name": "示例报表网站（请替换域名）",
+      "enabled": true,
+      "domain": "reports.example.com",
+      "includeSubdomains": false,
+      "source": "referrer",
+      "presetId": "documents",
+      "priority": 10
+    }
+  ]
+}

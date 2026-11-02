@@ -1,0 +1,24 @@
+{
+  "name": "download-path-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "按网站规则将 Chrome 下载保存到预设子目录。",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:browser": "node tests/browser-smoke.mjs",
+    "check": "npm run typecheck && npm test && npm run build",
+    "package": "npm run check && node scripts/package.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": {
+    "@types/chrome": "0.3.7",
+    "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
+    "playwright": "1.64.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
